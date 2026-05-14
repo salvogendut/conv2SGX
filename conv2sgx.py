@@ -4,40 +4,42 @@ conv2sgx.py - Convert PNG/JPG images to SymbOS SGX format
 
 SGX chunk formats (CPCWiki spec):
 
-  Simple chunk (4-colour only, byte 0 bit0-6 must be 1–63):
-    byte 0: [bit0-6] width in bytes (max 63 = 252 px), [bit7] compressed
+  Simple chunk (4-colour only, row_bytes in bits 0-6, max 63 = 252 px wide):
+    byte 0: [bit0-6] width in bytes, [bit7] compressed flag
     byte 1: width in pixels
     byte 2: height in pixels
-    <CPC Mode 1 pixel data: 4 px/byte>
+    (if compressed: 2-byte LE compressed-payload size, then SymbOS ZX0 payload)
+    (if raw:        pixel data directly)
 
-  Extended chunk (16-colour; byte 0 bit0-6 = 64 constant):
-    byte 0: 0x40  ([bit0-6]=64 = extended marker, [bit7]=0 uncompressed)
+  Extended chunk (16-colour; bit0-6 of byte 0 = 0x40 marker):
+    byte 0: 0x40 | [bit7] compressed flag
     byte 1: type  (0 = 4-colour, 5 = 16-colour)
     bytes 2-3: width in bytes  (little-endian word)
     bytes 4-5: width in pixels (little-endian word)
     bytes 6-7: height in pixels (little-endian word)
-    <MSX Screen 5 pixel data: 2 px/byte, high nibble = left pixel>
+    (if compressed: 2-byte LE compressed-payload size, then SymbOS ZX0 payload)
+    (if raw:        pixel data directly)
 
-Width must be a multiple of 4. Max image width: 1020 px.
-Each chunk payload is kept ≤ 16 384 bytes (one 16K SymbOS memory bank).
-A 3-byte null terminator (00 00 00) is written after the last chunk,
-as required by the SymbOS wallpaper loader.
+SymbOS ZX0 payload (Banking_Decompress wrapper):
+    bytes 0-3: last 4 bytes of uncompressed data
+    bytes 4-5: uncompressed prefix size (always 0x00 0x00)
+    bytes 6+:  ZX0-compressed stream of (uncompressed data minus last 4 bytes)
+               using the inverted ZX0 variant (FLG_IS_INVERTED=1)
+
+4-colour images: always split into simple chunks of ≤ 252 px (63 bytes/row).
+16-colour images: split into extended chunks so each uncompressed payload ≤ 16 384 bytes.
+All chunks are always compressed.  A 3-byte null terminator (00 00 00) closes the file.
 """
 
 import argparse
 import os
+import subprocess
 import sys
 
 try:
     from PIL import Image
 except ImportError:
     sys.exit("Pillow is required: pip install Pillow")
-
-try:
-    import numpy as np
-    HAVE_NUMPY = True
-except ImportError:
-    HAVE_NUMPY = False
 
 # -----------------------------------------------------------------------
 # SymbOS fixed palette (8-bit sRGB, from gfx2sgx.c)
@@ -62,7 +64,6 @@ PALETTE = [
     (0xf7, 0x06, 0x06),  # 15 red
 ]
 
-# Pre-compute palette as flat list for quick indexing
 _PR = [c[0] for c in PALETTE]
 _PG = [c[1] for c in PALETTE]
 _PB = [c[2] for c in PALETTE]
@@ -73,7 +74,6 @@ _PB = [c[2] for c in PALETTE]
 # -----------------------------------------------------------------------
 
 def _nearest(r, g, b, n):
-    """Nearest palette index (Euclidean RGB distance, same as gfx2sgx.c)."""
     best, best_d = 0, 1 << 30
     for i in range(n):
         d = (_PR[i] - r) ** 2 + (_PG[i] - g) ** 2 + (_PB[i] - b) ** 2
@@ -86,7 +86,7 @@ def _nearest(r, g, b, n):
 
 
 # -----------------------------------------------------------------------
-# Dithering algorithms  (all return a 2-D list[y][x] of palette indices)
+# Dithering algorithms
 # -----------------------------------------------------------------------
 
 def _clamp(v):
@@ -102,7 +102,6 @@ def quantize_none(rgb_rows, width, height, n):
 
 
 def quantize_floyd_steinberg(rgb_rows, width, height, n):
-    # Work on a mutable float copy
     r = [[float(rgb_rows[y][x][0]) for x in range(width)] for y in range(height)]
     g = [[float(rgb_rows[y][x][1]) for x in range(width)] for y in range(height)]
     b = [[float(rgb_rows[y][x][2]) for x in range(width)] for y in range(height)]
@@ -137,7 +136,6 @@ def quantize_atkinson(rgb_rows, width, height, n):
     g = [[float(rgb_rows[y][x][1]) for x in range(width)] for y in range(height)]
     b = [[float(rgb_rows[y][x][2]) for x in range(width)] for y in range(height)]
     out = [[0] * width for _ in range(height)]
-    # Atkinson: spread 6/8 of error to 6 neighbours (1/8 each, 2/8 lost)
     offsets = [(0, 1), (0, 2), (1, -1), (1, 0), (1, 1), (2, 0)]
     for y in range(height):
         for x in range(width):
@@ -154,7 +152,6 @@ def quantize_atkinson(rgb_rows, width, height, n):
     return out
 
 
-# 4x4 Bayer matrix, values 0-15
 _BAYER4 = [
     [ 0,  8,  2, 10],
     [12,  4, 14,  6],
@@ -165,7 +162,7 @@ _BAYER4 = [
 
 def quantize_ordered(rgb_rows, width, height, n):
     out = [[0] * width for _ in range(height)]
-    scale = 24  # dither intensity (tunable)
+    scale = 24
     for y in range(height):
         for x in range(width):
             offset = (_BAYER4[y & 3][x & 3] / 15.0 - 0.5) * scale
@@ -177,7 +174,7 @@ def quantize_ordered(rgb_rows, width, height, n):
 
 
 # -----------------------------------------------------------------------
-# SGX encoding
+# SGX pixel encoding
 # -----------------------------------------------------------------------
 
 def _encode_4color_row(row, width):
@@ -213,64 +210,133 @@ def _encode_16color_row(row, width):
     return bytes(data)
 
 
+# -----------------------------------------------------------------------
+# ZX0 compression (SymbOS inverted variant)
+# -----------------------------------------------------------------------
+
+# Path to the zx0tool binary (next to this script)
+_ZX0_TOOL = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'zx0tool')
+
+# Clean PATH so the system assembler/linker is used, not scc Z80 tools
+_CLEAN_ENV = dict(os.environ)
+_CLEAN_ENV['PATH'] = '/usr/local/bin:/usr/bin:/bin:' + os.environ.get('PATH', '')
+
+
+def _zx0_compress(data):
+    """Compress bytes using ZX0 inverted format (SymbOS Banking_Decompress compatible)."""
+    result = subprocess.run(
+        [_ZX0_TOOL],
+        input=bytes(data),
+        capture_output=True,
+        env=_CLEAN_ENV,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"zx0tool failed: {result.stderr.decode()}")
+    return result.stdout
+
+
+def _symsbos_zx0_payload(uncompressed):
+    """
+    Build the SymbOS ZX0 payload for a chunk:
+      [last 4 bytes of uncompressed] [0x00 0x00] [ZX0 stream of rest]
+    Returns the payload bytes.
+    """
+    data = bytes(uncompressed)
+    if len(data) < 4:
+        # Pad to 4 bytes so we can always take the last-4 tail
+        data = data + b'\x00' * (4 - len(data))
+    last4 = data[-4:]
+    rest = data[:-4]
+    zx0_stream = _zx0_compress(rest) if rest else b''
+    return last4 + b'\x00\x00' + zx0_stream
+
+
+# -----------------------------------------------------------------------
+# SGX chunk building
+# -----------------------------------------------------------------------
+
 # Each uncompressed chunk payload must fit in one 16K SymbOS memory bank.
 _MAX_CHUNK_BYTES = 16384
 
+# 4-colour simple chunks: row_bytes in bits 0-6, so max 63 bytes/row = 252 px wide.
+_MAX_4COLOR_CHUNK_PX = 252
+
+
+def _build_pixel_data(chunk_pixels, chunk_w, height, num_colors):
+    """Return raw (uncompressed) pixel bytes for one chunk."""
+    encode_row = _encode_4color_row if num_colors == 4 else _encode_16color_row
+    data = bytearray()
+    for row in chunk_pixels:
+        data += encode_row(row, chunk_w)
+    return bytes(data)
+
 
 def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors):
-    """Append one chunk (header + pixel data) to buf."""
+    """Append one compressed chunk (header + payload) to buf."""
     row_bytes = chunk_w // 4 if num_colors == 4 else chunk_w // 2
-    # Simple chunk: 4-colour only, row_bytes must fit in 6 bits (≤ 63 = 252 px wide).
-    # Extended chunk: required for 16-colour, or 4-colour images wider than 252 px.
-    use_extended = (num_colors == 16) or (row_bytes > 63)
-    if not use_extended:
-        buf.append(row_bytes)
-        buf.append(chunk_w)
-        buf.append(height)
-        for row in chunk_pixels:
-            buf += _encode_4color_row(row, chunk_w)
-    else:
-        type_byte = 0x05 if num_colors == 16 else 0x00
-        buf.append(0x40)                 # extended marker, not compressed
-        buf.append(type_byte)
-        buf.append(row_bytes & 0xFF)
-        buf.append(row_bytes >> 8)
+
+    # Build uncompressed pixel data, then compress it
+    raw = _build_pixel_data(chunk_pixels, chunk_w, height, num_colors)
+    payload = _symsbos_zx0_payload(raw)
+    comp_size = len(payload)
+
+    if num_colors == 4:
+        # Simple chunk: row_bytes must be ≤ 63 (6 bits); bit7 = compressed
+        assert row_bytes <= 63, f"4-colour chunk too wide: {chunk_w}px = {row_bytes} bytes/row"
+        buf.append(row_bytes | 0x80)    # bit7 = compressed
         buf.append(chunk_w & 0xFF)
-        buf.append(chunk_w >> 8)
         buf.append(height & 0xFF)
-        buf.append(height >> 8)
-        encode_row = _encode_16color_row if num_colors == 16 else _encode_4color_row
-        for row in chunk_pixels:
-            buf += encode_row(row, chunk_w)
+        buf.append(comp_size & 0xFF)
+        buf.append((comp_size >> 8) & 0xFF)
+        buf += payload
+    else:
+        # Extended chunk: byte0 = 0xC0 (0x40 marker | 0x80 compressed), type = 5
+        buf.append(0xC0)                # 0x40 | 0x80
+        buf.append(0x05)                # type = 16-colour
+        buf.append(row_bytes & 0xFF)
+        buf.append((row_bytes >> 8) & 0xFF)
+        buf.append(chunk_w & 0xFF)
+        buf.append((chunk_w >> 8) & 0xFF)
+        buf.append(height & 0xFF)
+        buf.append((height >> 8) & 0xFF)
+        buf.append(comp_size & 0xFF)
+        buf.append((comp_size >> 8) & 0xFF)
+        buf += payload
 
 
 def build_sgx(pixels, width, height, num_colors):
-    """Return SGX file content as bytes, with 16K chunk splitting and null terminator."""
+    """Return SGX file content as bytes."""
     buf = bytearray()
-    px_per_byte = 4 if num_colors == 4 else 2
 
-    # Maximum chunk width: largest multiple of 4 whose payload fits in 16K.
-    max_row_bytes = _MAX_CHUNK_BYTES // height
-    max_chunk_px = (max_row_bytes * px_per_byte) & ~3   # round down to multiple of 4
-    if max_chunk_px < 4:
-        max_chunk_px = 4
+    if num_colors == 4:
+        # 4-colour: simple chunks only, max 252 px wide
+        max_chunk_px = _MAX_4COLOR_CHUNK_PX
+    else:
+        # 16-colour: split so uncompressed payload ≤ 16K
+        px_per_byte = 2
+        max_row_bytes = _MAX_CHUNK_BYTES // height
+        max_chunk_px = (max_row_bytes * px_per_byte) & ~3
+        if max_chunk_px < 4:
+            max_chunk_px = 4
 
-    # Split horizontally into chunks and write each one.
     x = 0
     while x < width:
         chunk_w = min(max_chunk_px, width - x)
+        # Width must be a multiple of 4
+        chunk_w = chunk_w & ~3
+        if chunk_w == 0:
+            chunk_w = 4
         chunk_pixels = [row[x:x + chunk_w] for row in pixels]
         _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors)
         x += chunk_w
 
-    # Null terminator required by the SymbOS wallpaper loader.
-    # A 3-byte null simple-chunk header (width=0) signals end-of-file.
+    # Null terminator: 3-byte zero chunk header signals end-of-file
     buf += b'\x00\x00\x00'
     return bytes(buf)
 
 
 # -----------------------------------------------------------------------
-# Preview (write a PNG showing the converted result)
+# Preview
 # -----------------------------------------------------------------------
 
 def save_preview(pixels, width, height, path):
@@ -342,14 +408,16 @@ Examples:
 
     args = p.parse_args()
 
-    # Output filename
+    if not os.path.exists(_ZX0_TOOL):
+        sys.exit(f"ZX0 compressor not found: {_ZX0_TOOL}\n"
+                 f"Build it with: cd {os.path.dirname(_ZX0_TOOL)} && make zx0tool")
+
     if args.output:
         outfile = args.output
     else:
         base = os.path.splitext(args.input)[0]
         outfile = base + '.sgx'
 
-    # Load image
     try:
         img = Image.open(args.input).convert('RGB')
     except Exception as e:
@@ -358,7 +426,6 @@ Examples:
     orig_w, orig_h = img.size
     print(f"Input : {args.input}  ({orig_w} x {orig_h})")
 
-    # ---- Compute target size ----
     tw, th = orig_w, orig_h
 
     if args.fit:
@@ -384,11 +451,16 @@ Examples:
             th = args.height
             tw = int(orig_w * args.height / orig_h) if not args.no_aspect else orig_w
 
-    # Enforce width multiple of 4, clamp to SGX limits.
-    # Extended chunk uses 16-bit word fields so supports widths beyond 252;
-    # 1020 px is the documented maximum for SymbOS extended graphics.
-    tw = max(4, min(1020, (tw + 3) & ~3))
+    # Width multiple of 4; max 255 rows; max width depends on mode
+    tw = max(4, (tw + 3) & ~3)
     th = max(1, min(255, th))
+
+    # For 4-colour, total width can exceed 252 (it'll be split into chunks).
+    # For 16-colour, extended chunks support large widths.
+    if args.colors == 4:
+        tw = min(tw, 1020)   # arbitrary max (4 × 255 chunks of 252px each)
+    else:
+        tw = min(tw, 1020)
 
     if (tw, th) != (orig_w, orig_h):
         img = img.resize((tw, th), Image.LANCZOS)
@@ -396,10 +468,8 @@ Examples:
     else:
         print(f"Size  : {tw} x {th}  (no scaling)")
 
-    # ---- Quantize ----
     print(f"Colors: {args.colors}   Dither: {args.dither}")
 
-    # Build rgb_rows: list of rows, each row a list of (r,g,b) tuples
     pix = img.load()
     rgb_rows = [[(pix[x, y][0], pix[x, y][1], pix[x, y][2])
                  for x in range(tw)]
@@ -408,7 +478,7 @@ Examples:
     quantize_fn = DITHERS[args.dither]
     pixels = quantize_fn(rgb_rows, tw, th, args.colors)
 
-    # ---- Encode SGX ----
+    print("Compressing...")
     sgx_data = build_sgx(pixels, tw, th, args.colors)
 
     try:
@@ -418,7 +488,6 @@ Examples:
     except Exception as e:
         sys.exit(f"Cannot write output: {e}")
 
-    # ---- Optional preview ----
     if args.preview:
         prev_path = os.path.splitext(outfile)[0] + '_preview.png'
         save_preview(pixels, tw, th, prev_path)

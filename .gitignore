@@ -2,3 +2,5 @@ pictures/
 *.sgx
 *.png
 *.jpg
+zx0tool
+*.o
