@@ -2,19 +2,21 @@
 """
 conv2sgx.py - Convert PNG/JPG images to SymbOS SGX format
 
-SGX format (derived from gfx2sgx.c by Prodatron/SymbiosiS):
+SGX chunk formats (CPCWiki spec):
 
-  4-colour header (3 bytes):
-    byte 0: width / 4      (CPC Mode 1: 4 pixels per byte)
-    byte 1: width in px
-    byte 2: height in px
-  16-colour header (10 bytes):
-    byte 0: width / 2      (MSX Screen 5: 2 pixels per byte)
-    byte 1: width in px
-    byte 2: height in px
-    bytes 3-6: 0x00 0x00 0x00 0x00
-    bytes 7-8: data size (little-endian word)
-    byte 9: 0x05           (encoding: 16-colour MSX)
+  Simple chunk (4-colour only, byte 0 bit0-6 must be 1–63):
+    byte 0: [bit0-6] width in bytes (max 63 = 252 px), [bit7] compressed
+    byte 1: width in pixels
+    byte 2: height in pixels
+    <CPC Mode 1 pixel data: 4 px/byte>
+
+  Extended chunk (16-colour; byte 0 bit0-6 = 64 constant):
+    byte 0: 0x40  ([bit0-6]=64 = extended marker, [bit7]=0 uncompressed)
+    byte 1: type  (0 = 4-colour, 5 = 16-colour)
+    bytes 2-3: width in bytes  (little-endian word)
+    bytes 4-5: width in pixels (little-endian word)
+    bytes 6-7: height in pixels (little-endian word)
+    <MSX Screen 5 pixel data: 2 px/byte, high nibble = left pixel>
 
 Width must be a multiple of 4. Max size: 252 x 255.
 """
@@ -211,24 +213,31 @@ def _encode_16color_row(row, width):
 def build_sgx(pixels, width, height, num_colors):
     """Return SGX file content as bytes."""
     buf = bytearray()
-    if num_colors == 4:
-        buf.append(width // 4)
+    row_bytes = width // 4 if num_colors == 4 else width // 2
+
+    # Simple chunk: 4-colour only, and width must fit in 6 bits (≤ 63 bytes = 252 px).
+    # Extended chunk: required for 16-colour, and for 4-colour images wider than 252 px.
+    use_extended = (num_colors == 16) or (row_bytes > 63)
+
+    if not use_extended:
+        buf.append(row_bytes)
         buf.append(width)
         buf.append(height)
         for row in pixels:
             buf += _encode_4color_row(row, width)
     else:
-        row_bytes = width // 2
-        data_size = row_bytes * height
-        buf.append(row_bytes)
-        buf.append(width)
-        buf.append(height)
-        buf += b'\x00\x00\x00\x00'
-        buf.append(data_size & 0xFF)
-        buf.append(data_size >> 8)
-        buf.append(0x05)
+        type_byte = 0x05 if num_colors == 16 else 0x00
+        buf.append(0x40)                 # extended marker, not compressed
+        buf.append(type_byte)
+        buf.append(row_bytes & 0xFF)     # width in bytes, low
+        buf.append(row_bytes >> 8)       # width in bytes, high
+        buf.append(width & 0xFF)         # width in pixels, low
+        buf.append(width >> 8)           # width in pixels, high
+        buf.append(height & 0xFF)        # height, low
+        buf.append(height >> 8)          # height, high
+        encode_row = _encode_16color_row if num_colors == 16 else _encode_4color_row
         for row in pixels:
-            buf += _encode_16color_row(row, width)
+            buf += encode_row(row, width)
     return bytes(buf)
 
 
@@ -347,8 +356,10 @@ Examples:
             th = args.height
             tw = int(orig_w * args.height / orig_h) if not args.no_aspect else orig_w
 
-    # Enforce width multiple of 4, clamp to SGX limits
-    tw = max(4, min(252, (tw + 3) & ~3))
+    # Enforce width multiple of 4, clamp to SGX limits.
+    # Extended chunk uses 16-bit word fields so supports widths beyond 252;
+    # 1020 px is the documented maximum for SymbOS extended graphics.
+    tw = max(4, min(1020, (tw + 3) & ~3))
     th = max(1, min(255, th))
 
     if (tw, th) != (orig_w, orig_h):
