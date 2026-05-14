@@ -18,7 +18,10 @@ SGX chunk formats (CPCWiki spec):
     bytes 6-7: height in pixels (little-endian word)
     <MSX Screen 5 pixel data: 2 px/byte, high nibble = left pixel>
 
-Width must be a multiple of 4. Max size: 252 x 255.
+Width must be a multiple of 4. Max image width: 1020 px.
+Each chunk payload is kept ≤ 16 384 bytes (one 16K SymbOS memory bank).
+A 3-byte null terminator (00 00 00) is written after the last chunk,
+as required by the SymbOS wallpaper loader.
 """
 
 import argparse
@@ -210,34 +213,59 @@ def _encode_16color_row(row, width):
     return bytes(data)
 
 
-def build_sgx(pixels, width, height, num_colors):
-    """Return SGX file content as bytes."""
-    buf = bytearray()
-    row_bytes = width // 4 if num_colors == 4 else width // 2
+# Each uncompressed chunk payload must fit in one 16K SymbOS memory bank.
+_MAX_CHUNK_BYTES = 16384
 
-    # Simple chunk: 4-colour only, and width must fit in 6 bits (≤ 63 bytes = 252 px).
-    # Extended chunk: required for 16-colour, and for 4-colour images wider than 252 px.
+
+def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors):
+    """Append one chunk (header + pixel data) to buf."""
+    row_bytes = chunk_w // 4 if num_colors == 4 else chunk_w // 2
+    # Simple chunk: 4-colour only, row_bytes must fit in 6 bits (≤ 63 = 252 px wide).
+    # Extended chunk: required for 16-colour, or 4-colour images wider than 252 px.
     use_extended = (num_colors == 16) or (row_bytes > 63)
-
     if not use_extended:
         buf.append(row_bytes)
-        buf.append(width)
+        buf.append(chunk_w)
         buf.append(height)
-        for row in pixels:
-            buf += _encode_4color_row(row, width)
+        for row in chunk_pixels:
+            buf += _encode_4color_row(row, chunk_w)
     else:
         type_byte = 0x05 if num_colors == 16 else 0x00
         buf.append(0x40)                 # extended marker, not compressed
         buf.append(type_byte)
-        buf.append(row_bytes & 0xFF)     # width in bytes, low
-        buf.append(row_bytes >> 8)       # width in bytes, high
-        buf.append(width & 0xFF)         # width in pixels, low
-        buf.append(width >> 8)           # width in pixels, high
-        buf.append(height & 0xFF)        # height, low
-        buf.append(height >> 8)          # height, high
+        buf.append(row_bytes & 0xFF)
+        buf.append(row_bytes >> 8)
+        buf.append(chunk_w & 0xFF)
+        buf.append(chunk_w >> 8)
+        buf.append(height & 0xFF)
+        buf.append(height >> 8)
         encode_row = _encode_16color_row if num_colors == 16 else _encode_4color_row
-        for row in pixels:
-            buf += encode_row(row, width)
+        for row in chunk_pixels:
+            buf += encode_row(row, chunk_w)
+
+
+def build_sgx(pixels, width, height, num_colors):
+    """Return SGX file content as bytes, with 16K chunk splitting and null terminator."""
+    buf = bytearray()
+    px_per_byte = 4 if num_colors == 4 else 2
+
+    # Maximum chunk width: largest multiple of 4 whose payload fits in 16K.
+    max_row_bytes = _MAX_CHUNK_BYTES // height
+    max_chunk_px = (max_row_bytes * px_per_byte) & ~3   # round down to multiple of 4
+    if max_chunk_px < 4:
+        max_chunk_px = 4
+
+    # Split horizontally into chunks and write each one.
+    x = 0
+    while x < width:
+        chunk_w = min(max_chunk_px, width - x)
+        chunk_pixels = [row[x:x + chunk_w] for row in pixels]
+        _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors)
+        x += chunk_w
+
+    # Null terminator required by the SymbOS wallpaper loader.
+    # A 3-byte null simple-chunk header (width=0) signals end-of-file.
+    buf += b'\x00\x00\x00'
     return bytes(buf)
 
 
