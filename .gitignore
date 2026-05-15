@@ -1,6 +1,7 @@
-pictures/
 *.sgx
 *.png
 *.jpg
+!samples/
+!samples/**
 zx0tool
 *.o
