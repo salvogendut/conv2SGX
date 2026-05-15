@@ -1,3 +1,6 @@
+![Example Image](manado-miyazaki.png)
+![Example Image](manadOU_preview.png)
+
 # conv2SGX
 
 Convert PNG/JPG images to SymbOS SGX graphic format, for use as wallpapers or sprites on [SymbOS](https://symbos.org) (Z80-based OS for Amstrad CPC, MSX, etc.).
