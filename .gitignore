@@ -3,7 +3,9 @@
 *.jpg
 !pictures/
 !pictures/**
-samples/
+!samples/
+!samples/**
 sources/
+!sources/manado-miyazaki.png
 zx0tool
 *.o
