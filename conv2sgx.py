@@ -26,9 +26,9 @@ SymbOS ZX0 payload (Banking_Decompress wrapper):
     bytes 6+:  ZX0-compressed stream of (uncompressed data minus last 4 bytes)
                using the inverted ZX0 variant (FLG_IS_INVERTED=1)
 
-4-colour images: always split into simple chunks of ≤ 252 px (63 bytes/row).
-16-colour images: split into extended chunks so each uncompressed payload ≤ 16 384 bytes.
-All chunks are always compressed.  A 3-byte null terminator (00 00 00) closes the file.
+4-colour images: always split into simple chunks of 160 px wide (SymbOS wallpaper loader requirement).
+16-colour images: split into extended chunks so each uncompressed payload <= 16 384 bytes.
+All SGX files end with a 3-byte null terminator (00 00 00).
 """
 
 import argparse
@@ -243,7 +243,6 @@ def _symsbos_zx0_payload(uncompressed):
     """
     data = bytes(uncompressed)
     if len(data) < 4:
-        # Pad to 4 bytes so we can always take the last-4 tail
         data = data + b'\x00' * (4 - len(data))
     last4 = data[-4:]
     rest = data[:-4]
@@ -272,13 +271,12 @@ def _build_pixel_data(chunk_pixels, chunk_w, height, num_colors):
     return bytes(data)
 
 
-def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors, compress=True):
+def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors, compress=False):
     """Append one chunk (header + payload) to buf."""
     row_bytes = chunk_w // 4 if num_colors == 4 else chunk_w // 2
     raw = _build_pixel_data(chunk_pixels, chunk_w, height, num_colors)
 
     if num_colors == 4:
-        # Simple chunk: row_bytes must be ≤ 63 (6 bits); bit7 = compressed flag
         assert row_bytes <= 63, f"4-colour chunk too wide: {chunk_w}px = {row_bytes} bytes/row"
         if compress:
             payload = _symsbos_zx0_payload(raw)
@@ -294,7 +292,6 @@ def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors, compress=True):
             buf.append(height & 0xFF)
             buf += raw
     else:
-        # Extended chunk
         if compress:
             payload = _symsbos_zx0_payload(raw)
             buf.append(0xC0)            # 0x40 marker | 0x80 compressed
@@ -320,15 +317,13 @@ def _write_chunk(buf, chunk_pixels, chunk_w, height, num_colors, compress=True):
             buf += raw
 
 
-def build_sgx(pixels, width, height, num_colors, compress=True):
+def build_sgx(pixels, width, height, num_colors, compress=False):
     """Return SGX file content as bytes."""
     buf = bytearray()
 
     if num_colors == 4:
-        # 4-colour: simple chunks only, max 252 px wide
         max_chunk_px = _MAX_4COLOR_CHUNK_PX
     else:
-        # 16-colour: split so uncompressed payload ≤ 16K
         px_per_byte = 2
         max_row_bytes = _MAX_CHUNK_BYTES // height
         max_chunk_px = (max_row_bytes * px_per_byte) & ~3
@@ -374,6 +369,25 @@ DITHERS = {
     'ordered':         quantize_ordered,
 }
 
+# (width, height, colors, 8.3-prefix)
+_PRESETS = {
+    'cpc-m0':    (160, 200,  16, 'C0'),
+    'cpc-m1':    (320, 200,   4, 'C1'),
+    'cpc-m2':    (640, 200,   4, 'C2'),
+    'msx':       (256, 192,  16, 'M1'),
+    'msx2-l-16': (256, 212,  16, 'M5'),
+    'msx2-l-4':  (256, 212,   4, 'M6'),
+    'msx2-h-16': (512, 212,  16, 'M7'),
+    'msx2-h-4':  (512, 212,   4, 'M8'),
+}
+
+_DITHER_INITIAL = {
+    'floyd-steinberg': 'F',
+    'atkinson':        'A',
+    'ordered':         'O',
+    'none':            'N',
+}
+
 
 def parse_fit(s):
     parts = s.lower().split('x')
@@ -391,19 +405,20 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  conv2sgx.py photo.png                         # 16-colour, Floyd-Steinberg, no scaling
-  conv2sgx.py photo.png -c 4 -d atkinson        # 4-colour with Atkinson dither
-  conv2sgx.py photo.png --fit 320x200            # scale to fit 320x200, keep aspect ratio
-  conv2sgx.py photo.png -W 128 -H 64 --no-aspect # stretch to exactly 128x64
-  conv2sgx.py photo.png -s 0.5 -d ordered        # half size, Bayer ordered dither
-  conv2sgx.py photo.png --preview                 # also save a PNG preview
-  conv2sgx.py photo.png --amstrad                 # Amstrad CPC preset: 320x200, 4-colour
-  conv2sgx.py photo.png --msx                     # MSX preset: 512x212, 16-colour
+  conv2sgx.py photo.png                              # 16-colour, Floyd-Steinberg, no scaling
+  conv2sgx.py photo.png -c 4 -d atkinson            # 4-colour with Atkinson dither
+  conv2sgx.py photo.png --fit 320x200               # scale to fit 320x200, keep aspect ratio
+  conv2sgx.py photo.png -W 128 -H 64 --no-aspect    # stretch to exactly 128x64
+  conv2sgx.py photo.png -s 0.5 -d ordered           # half size, Bayer ordered dither
+  conv2sgx.py photo.png --preview                   # also save a PNG preview
+  conv2sgx.py photo.png --compress                  # apply ZX0 compression
+  conv2sgx.py photo.png --cpc-m1                    # CPC Mode 1 preset: 320x200, 4-colour
+  conv2sgx.py photo.png --msx2-h-16                 # MSX2 Screen 7: 512x212, 16-colour
 """)
 
     p.add_argument('input', help='Input image (.png or .jpg)')
     p.add_argument('-o', '--output', metavar='FILE',
-                   help='Output SGX file (default: <input>.sgx)')
+                   help='Output SGX file (default: <input>.SGX)')
     p.add_argument('-c', '--colors', type=int, choices=[4, 16], default=16,
                    help='Colour depth: 4 or 16 (default: 16)')
     p.add_argument('-d', '--dither',
@@ -421,53 +436,34 @@ Examples:
                    help='Stretch to exact size instead of preserving aspect ratio')
     p.add_argument('--preview', action='store_true',
                    help='Save a PNG preview alongside the SGX file')
-    p.add_argument('--no-compress', action='store_true',
-                   help='Write raw uncompressed SGX (no ZX0; matches official FantasyKeithParkinson format)')
+    p.add_argument('--compress', action='store_true',
+                   help='Apply ZX0 compression (default is uncompressed)')
+    p.add_argument('--8.3', dest='short_names', action='store_true',
+                   help='Use 8.3 filename scheme: {PP}{NNN}{D}{L|H}.SGX')
 
     machine = p.add_mutually_exclusive_group()
-    machine.add_argument('--amstrad', action='store_true',
-                         help='Amstrad CPC preset: 320x200, 4-colour; auto-names output A{name}{dither}{L|H}.SGX')
-    machine.add_argument('--msx', action='store_true',
-                         help='MSX preset: 512x212, 16-colour; auto-names output M{name}{dither}{L|H}.SGX')
+    for key in _PRESETS:
+        machine.add_argument(f'--{key}', action='store_const', const=key, dest='preset',
+                             help=f'{key} preset: {_PRESETS[key][0]}x{_PRESETS[key][1]}, '
+                                  f'{_PRESETS[key][2]}-colour (prefix {_PRESETS[key][3]})')
 
     args = p.parse_args()
 
-    # Apply machine presets (only if the user hasn't explicitly set those options)
-    if args.amstrad:
+    # Apply machine preset
+    if args.preset:
+        pw, ph, pc, _ = _PRESETS[args.preset]
         if not args.width:
-            args.width = 320
+            args.width = pw
         if not args.height:
-            args.height = 200
-        if args.colors == 16:   # still at default — override
-            args.colors = 4
+            args.height = ph
+        if args.colors == 16:   # still at default — let preset win
+            args.colors = pc
         args.no_aspect = True
-    elif args.msx:
-        if not args.width:
-            args.width = 512
-        if not args.height:
-            args.height = 212
-        args.no_aspect = True
+        args.short_names = True
 
-    if not args.no_compress and not os.path.exists(_ZX0_TOOL):
+    if args.compress and not os.path.exists(_ZX0_TOOL):
         sys.exit(f"ZX0 compressor not found: {_ZX0_TOOL}\n"
                  f"Build it with: cd {os.path.dirname(_ZX0_TOOL)} && make zx0tool")
-
-    if args.output:
-        outfile = args.output
-    elif args.amstrad or args.msx:
-        # Short filename scheme for machines with no long filename support:
-        # {A|M}{3-letter-name}{dither-initial}{L|H}.SGX
-        prefix = 'A' if args.amstrad else 'M'
-        stem = os.path.splitext(os.path.basename(args.input))[0]
-        name3 = stem[:3]
-        dither_initial = {'floyd-steinberg': 'F', 'atkinson': 'A',
-                          'ordered': 'O', 'none': 'N'}[args.dither]
-        # Determine resolution tag after scaling is applied — use requested dims for now;
-        # will be refined below once tw/th are known. Placeholder, overwritten later.
-        outfile = None   # resolved after scaling
-    else:
-        base = os.path.splitext(args.input)[0]
-        outfile = base + '.sgx'
 
     try:
         img = Image.open(args.input).convert('RGB')
@@ -502,16 +498,9 @@ Examples:
             th = args.height
             tw = int(orig_w * args.height / orig_h) if not args.no_aspect else orig_w
 
-    # Width multiple of 4; max 255 rows; max width depends on mode
     tw = max(4, (tw + 3) & ~3)
     th = max(1, min(255, th))
-
-    # For 4-colour, total width can exceed 252 (it'll be split into chunks).
-    # For 16-colour, extended chunks support large widths.
-    if args.colors == 4:
-        tw = min(tw, 1020)   # arbitrary max (4 × 255 chunks of 252px each)
-    else:
-        tw = min(tw, 1020)
+    tw = min(tw, 1020)
 
     if (tw, th) != (orig_w, orig_h):
         img = img.resize((tw, th), Image.LANCZOS)
@@ -519,15 +508,19 @@ Examples:
     else:
         print(f"Size  : {tw} x {th}  (no scaling)")
 
-    # Resolve auto-generated filename now that final dimensions are known
-    if outfile is None:
-        prefix = 'A' if args.amstrad else 'M'
+    # Resolve output filename
+    if args.output:
+        outfile = args.output
+    elif args.short_names:
+        pp = _PRESETS[args.preset][3] if args.preset else ''
         stem = os.path.splitext(os.path.basename(args.input))[0]
         name3 = stem[:3]
-        dither_initial = {'floyd-steinberg': 'F', 'atkinson': 'A',
-                          'ordered': 'O', 'none': 'N'}[args.dither]
-        res_tag = 'L' if (tw == 320 and th == 200) else 'H'
-        outfile = f"{prefix}{name3}{dither_initial}{res_tag}.SGX"
+        d = _DITHER_INITIAL[args.dither]
+        res_tag = 'L' if tw <= 320 else 'H'
+        outfile = f"{pp}{name3}{d}{res_tag}.SGX"
+    else:
+        stem = os.path.splitext(args.input)[0]
+        outfile = stem + '.SGX'
 
     print(f"Colors: {args.colors}   Dither: {args.dither}")
 
@@ -539,9 +532,9 @@ Examples:
     quantize_fn = DITHERS[args.dither]
     pixels = quantize_fn(rgb_rows, tw, th, args.colors)
 
-    if not args.no_compress:
+    if args.compress:
         print("Compressing...")
-    sgx_data = build_sgx(pixels, tw, th, args.colors, compress=not args.no_compress)
+    sgx_data = build_sgx(pixels, tw, th, args.colors, compress=args.compress)
 
     try:
         with open(outfile, 'wb') as f:
