@@ -1,5 +1,5 @@
-![Example Image](manado-miyazaki.png)
-![Example Image](manadOU_preview.png)
+![Example Image](pictures/manado-miyazaki.png)
+![Example Image](pictures/manadOU_preview.png)
 
 # conv2SGX
 

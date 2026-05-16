@@ -1,8 +1,8 @@
 *.sgx
 *.png
 *.jpg
-!manado-miyazaki.png
-!manadOU_preview.png
+!pictures/
+!pictures/**
 !samples/
 !samples/**
 zx0tool
