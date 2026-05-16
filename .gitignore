@@ -3,7 +3,7 @@
 *.jpg
 !pictures/
 !pictures/**
-!samples/
-!samples/**
+samples/
+sources/
 zx0tool
 *.o

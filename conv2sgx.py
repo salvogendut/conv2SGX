@@ -397,6 +397,8 @@ Examples:
   conv2sgx.py photo.png -W 128 -H 64 --no-aspect # stretch to exactly 128x64
   conv2sgx.py photo.png -s 0.5 -d ordered        # half size, Bayer ordered dither
   conv2sgx.py photo.png --preview                 # also save a PNG preview
+  conv2sgx.py photo.png --amstrad                 # Amstrad CPC preset: 320x200, 4-colour
+  conv2sgx.py photo.png --msx                     # MSX preset: 512x212, 16-colour
 """)
 
     p.add_argument('input', help='Input image (.png or .jpg)')
@@ -422,7 +424,29 @@ Examples:
     p.add_argument('--no-compress', action='store_true',
                    help='Write raw uncompressed SGX (no ZX0; matches official FantasyKeithParkinson format)')
 
+    machine = p.add_mutually_exclusive_group()
+    machine.add_argument('--amstrad', action='store_true',
+                         help='Amstrad CPC preset: 320x200, 4-colour; auto-names output A{name}{dither}{L|H}.SGX')
+    machine.add_argument('--msx', action='store_true',
+                         help='MSX preset: 512x212, 16-colour; auto-names output M{name}{dither}{L|H}.SGX')
+
     args = p.parse_args()
+
+    # Apply machine presets (only if the user hasn't explicitly set those options)
+    if args.amstrad:
+        if not args.width:
+            args.width = 320
+        if not args.height:
+            args.height = 200
+        if args.colors == 16:   # still at default — override
+            args.colors = 4
+        args.no_aspect = True
+    elif args.msx:
+        if not args.width:
+            args.width = 512
+        if not args.height:
+            args.height = 212
+        args.no_aspect = True
 
     if not args.no_compress and not os.path.exists(_ZX0_TOOL):
         sys.exit(f"ZX0 compressor not found: {_ZX0_TOOL}\n"
@@ -430,6 +454,17 @@ Examples:
 
     if args.output:
         outfile = args.output
+    elif args.amstrad or args.msx:
+        # Short filename scheme for machines with no long filename support:
+        # {A|M}{3-letter-name}{dither-initial}{L|H}.SGX
+        prefix = 'A' if args.amstrad else 'M'
+        stem = os.path.splitext(os.path.basename(args.input))[0]
+        name3 = stem[:3]
+        dither_initial = {'floyd-steinberg': 'F', 'atkinson': 'A',
+                          'ordered': 'O', 'none': 'N'}[args.dither]
+        # Determine resolution tag after scaling is applied — use requested dims for now;
+        # will be refined below once tw/th are known. Placeholder, overwritten later.
+        outfile = None   # resolved after scaling
     else:
         base = os.path.splitext(args.input)[0]
         outfile = base + '.sgx'
@@ -483,6 +518,16 @@ Examples:
         print(f"Scaled: {tw} x {th}")
     else:
         print(f"Size  : {tw} x {th}  (no scaling)")
+
+    # Resolve auto-generated filename now that final dimensions are known
+    if outfile is None:
+        prefix = 'A' if args.amstrad else 'M'
+        stem = os.path.splitext(os.path.basename(args.input))[0]
+        name3 = stem[:3]
+        dither_initial = {'floyd-steinberg': 'F', 'atkinson': 'A',
+                          'ordered': 'O', 'none': 'N'}[args.dither]
+        res_tag = 'L' if (tw == 320 and th == 200) else 'H'
+        outfile = f"{prefix}{name3}{dither_initial}{res_tag}.SGX"
 
     print(f"Colors: {args.colors}   Dither: {args.dither}")
 
