@@ -6,9 +6,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOL="$SCRIPT_DIR/conv2sgx.py"
 SOURCES="$SCRIPT_DIR/sources"
-SAMPLES="$SCRIPT_DIR/output"
+OUTPUT="$SCRIPT_DIR/output"
 
-mkdir -p "$SAMPLES/cpc" "$SAMPLES/msx" "$SAMPLES/msx2"
+mkdir -p "$OUTPUT/cpc" "$OUTPUT/msx" "$OUTPUT/msx2"
 
 declare -A DITHERS=([F]=floyd-steinberg [A]=atkinson [N]=none [O]=ordered)
 
@@ -46,13 +46,13 @@ for src in "${sources[@]}"; do
             dither="${DITHERS[$d]}"
             outname="${prefix}${name3}${d}${res_tag}.SGX"
             python3 "$TOOL" "$src" $flag -d "$dither" --preview \
-                -o "$SAMPLES/$subdir/$outname"
+                -o "$OUTPUT/$subdir/$outname"
         done
     done
 done
 
 echo ""
-echo "Done. Output written to: $SAMPLES"
-echo "  cpc/:  $(ls "$SAMPLES/cpc/"*.SGX 2>/dev/null | wc -l) SGX files"
-echo "  msx/:  $(ls "$SAMPLES/msx/"*.SGX 2>/dev/null | wc -l) SGX files"
-echo "  msx2/: $(ls "$SAMPLES/msx2/"*.SGX 2>/dev/null | wc -l) SGX files"
+echo "Done. Output written to: $OUTPUT"
+echo "  cpc/:  $(ls "$OUTPUT/cpc/"*.SGX 2>/dev/null | wc -l) SGX files"
+echo "  msx/:  $(ls "$OUTPUT/msx/"*.SGX 2>/dev/null | wc -l) SGX files"
+echo "  msx2/: $(ls "$OUTPUT/msx2/"*.SGX 2>/dev/null | wc -l) SGX files"
