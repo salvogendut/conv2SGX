@@ -135,10 +135,11 @@ All SGX files end with a 3-byte null terminator (`00 00 00`).
 
 ```
 sources/         — input images; only manado-miyazaki.png is committed
-samples/
+output/          — convert-all.sh writes here (gitignored except placeholder.txt)
   cpc/           — CPC Mode 0/1/2 outputs
   msx/           — MSX1 outputs
   msx2/          — MSX2 Screen 5/6/7 outputs
+samples/         — committed example outputs (manado-miyazaki.png, all presets)
 pictures/        — committed example images for this README
-convert-all.sh   — batch script: converts everything in sources/ to all presets
+convert-all.sh   — batch script: converts everything in sources/ into output/
 ```

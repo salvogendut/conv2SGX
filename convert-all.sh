@@ -6,7 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOOL="$SCRIPT_DIR/conv2sgx.py"
 SOURCES="$SCRIPT_DIR/sources"
-SAMPLES="$SCRIPT_DIR/samples"
+SAMPLES="$SCRIPT_DIR/output"
 
 mkdir -p "$SAMPLES/cpc" "$SAMPLES/msx" "$SAMPLES/msx2"
 
@@ -52,7 +52,7 @@ for src in "${sources[@]}"; do
 done
 
 echo ""
-echo "Done."
+echo "Done. Output written to: $SAMPLES"
 echo "  cpc/:  $(ls "$SAMPLES/cpc/"*.SGX 2>/dev/null | wc -l) SGX files"
 echo "  msx/:  $(ls "$SAMPLES/msx/"*.SGX 2>/dev/null | wc -l) SGX files"
 echo "  msx2/: $(ls "$SAMPLES/msx2/"*.SGX 2>/dev/null | wc -l) SGX files"

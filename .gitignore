@@ -5,6 +5,8 @@
 !pictures/**
 !samples/
 !samples/**
+output/*
+!output/placeholder.txt
 sources/
 !sources/manado-miyazaki.png
 zx0tool
